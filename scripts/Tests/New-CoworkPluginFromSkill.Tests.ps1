@@ -162,6 +162,22 @@ try {
     Assert-True ((Get-FileHash -LiteralPath $result.SkillPath).Hash -eq (Get-FileHash -LiteralPath $sourceFile).Hash) 'Copied source changed.'
     Assert-True (Test-Path -LiteralPath $result.PackagePath -PathType Leaf) 'Package must persist.'
 
+    $initialFiles = @(Get-ChildItem -LiteralPath $result.PluginPath -File -Recurse -Force |
+        Sort-Object FullName | ForEach-Object {
+            '{0}|{1}' -f $_.FullName, (Get-FileHash -LiteralPath $_.FullName).Hash
+        })
+    foreach ($run in 2..3) {
+        Reset-TestState
+        Assert-Fails { Invoke-TestPlugin (Join-Path $testRoot 'interactive') } 'already exists'
+        Assert-True ($global:ReadSkillTestState.Calls.Count -eq 0) "Run $run must stop before any WIQD command."
+        $currentFiles = @(Get-ChildItem -LiteralPath $result.PluginPath -File -Recurse -Force |
+            Sort-Object FullName | ForEach-Object {
+                '{0}|{1}' -f $_.FullName, (Get-FileHash -LiteralPath $_.FullName).Hash
+            })
+        Assert-True (($currentFiles -join "`n") -ceq ($initialFiles -join "`n")) "Run $run changed the existing plugin files."
+        Write-Host "PASS: run $run blocked with 'already exists'; zero WIQD calls; existing files unchanged."
+    }
+
     Reset-TestState
     $customSkills = Join-Path $testRoot 'custom-skills'
     $null = New-Item -Path $customSkills -ItemType Directory
@@ -206,7 +222,7 @@ try {
     Assert-Fails { & $reader -SkillGroup paralegal -SkillName legal-research -ShareEmail 'a@example.com,b@example.com' } 'one plain email'
     Assert-True ($global:ReadSkillTestState.Calls.Count -eq 0) 'Invalid inputs must not invoke WIQD.'
 
-    Write-Host 'PASS: reader, prompts/retries, explicit paths, WhatIf, exact copy/ZIP, lifecycle order, all CLI failure gates, scope/ID checks, collision and input validation.'
+    Write-Host 'PASS: reader, prompts/retries, explicit paths, WhatIf, exact copy/ZIP, lifecycle order, all CLI failure gates, scope/ID checks, repeated-run protection, collision and input validation.'
 }
 finally {
     # Only this test's uniquely created directory is removed.
