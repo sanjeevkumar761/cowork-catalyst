@@ -43,6 +43,10 @@ guide.
 - **Targeted sharing:** grants access to one recipient, not the entire tenant.
 - **Safe previews:** use `-WhatIf` before making changes.
 - **Read-only mode:** read a skill without WIQD, sign-in, or deployment.
+- **Explicit updates:** replace a selected skill in its existing deployment with a
+  separately managed plugin package version.
+- **Source provenance:** retain source paths, Git revisions when available, file
+  hashes, and an attempt history in the local plugin project.
 
 > **Before you run:** the full workflow creates resources in your signed-in
 > Microsoft 365 tenant. Final package validation uploads the ZIP to Microsoft's
@@ -124,9 +128,11 @@ For `legal-research` with the default settings:
 | Plugin project | `plugins\legal-research` |
 | Copied skill | `plugins\legal-research\appPackage\skills\legal-research\SKILL.md` |
 | Deployable package | `plugins\legal-research\appPackage\build\appPackage.dev.zip` |
+| Local provenance/history | `plugins\legal-research\cowork-catalyst.provenance.json` |
 
 On success, the script returns an object with `PluginName`, `PluginPath`,
-`SkillPath`, `PackagePath`, `Environment`, and `SharedWith`.
+`SkillPath`, `PackagePath`, `Environment`, `SharedWith`, `PackageVersion`,
+`SourceSkillVersion`, and `ProvenancePath`.
 
 The recipient can look under **Copilot Cowork > Sources & Skills > Plugins >
 Shared with me**, subject to their account access and tenant policies.
@@ -236,6 +242,88 @@ Your skill instructions go here.
 Keep companion-file references relative to the skill folder. Cowork Catalyst
 copies files unchanged; it does not rewrite front matter or repair invalid skills.
 
+## Update an existing plugin
+
+Normal create runs still refuse an existing destination. Use **`-Update`** to
+intentionally update the plugin previously created for the selected skill:
+
+```powershell
+.\scripts\New-CoworkPluginFromSkill.ps1 `
+    -Update `
+    -SkillGroup paralegal `
+    -SkillName legal-research `
+    -SourceSkillVersion '2026.11' `
+    -ShareEmail 'colleague@contoso.com' `
+    -WhatIf
+```
+
+Remove `-WhatIf` when ready, then approve the confirmation. If the original
+deployment used a custom `-OutputPath` or `-Environment`, supply those same values.
+The source is still your **current local skill folder**; the script does not
+download, select, or check out a historical source version.
+
+An update:
+
+1. Requires an existing plugin, the exact skill registration, a supported shared
+   lifecycle, and populated deployment IDs. It does not create missing deployments.
+2. Plans a patch-version increment, such as `1.0.0` to `1.0.1`.
+3. After approval, **replaces the selected skill folder's contents**, including
+   removing resources no longer in the source. Save any local edits first.
+   Other skill folders are left untouched. Linked paths and overlapping
+   source/output directories are rejected.
+4. Validates source, re-provisions using the existing environment, verifies
+   deployment IDs did not change, packages, validates the exact ZIP, and shares
+   with the supplied recipient. It does not create a new project or remove
+   existing recipients' access.
+
+### Source versions and plugin versions are different
+
+| Value | Meaning |
+|---|---|
+| `-SourceSkillVersion` | Optional label you supply for the source, e.g. `2026.11`. Not automatically extracted from Markdown, verified against upstream, or used to fetch files. |
+| Source Git commit | Source repository's HEAD when available, with a separate dirty flag scoped to the skill folder. A dirty source is **not** claimed to be an exact copy of that commit. |
+| Source content hash | SHA-256 over a sorted inventory of relative file paths and their SHA-256 hashes, covering `SKILL.md` and companion files, including hidden files. Empty directories are not hashed. |
+| Plugin package version | M365 app manifest version. Create uses the scaffold's version; every approved update increments its patch component independently of the source label. |
+
+On the first update, a literal manifest version is migrated to
+`${{TEAMS_APP_VERSION}}`. Missing version settings are initialized in standard
+environment files under `env`; only the selected environment's version is
+incremented. Conflicting or malformed versions stop the run. There is no
+automatic major/minor rollover at the maximum patch value.
+
+Even if the source is unchanged, explicitly running `-Update` creates a new
+patch-version attempt. This is not an automatic upstream synchronization service.
+
+### Provenance and failure history
+
+The project-root `cowork-catalyst.provenance.json` records:
+
+- The resolved local source path and optional source-version label.
+- Git root, commit, and dirty state, or an explicit unavailable/not-a-repository
+  status. A new Git repository without commits is recorded as `unborn_repository`
+  with no commit; malformed/inaccessible repository metadata stops the run.
+- The `SKILL.md` hash, whole-skill content hash, and per-file hash inventory.
+- Each attempt's operation, environment, package version, timestamps, stage, and
+  `in_progress`, `succeeded`, or `failed` status.
+
+The selected skill's file inventory, hashes, and plugin version are checked in
+the final ZIP. The provenance file stays **outside the package**: it can contain
+machine-specific paths and is not uploaded as plugin content. Keep the local
+project/environment files to retain deployment identity and history. Provenance
+is a local audit record, not a signed attestation or live tenant-state query.
+
+Previously created plugins without provenance can be updated after the normal
+registration/scope/ID checks; their history begins with that update. Earlier
+source versions and deployment events cannot be reconstructed.
+
+**No automatic rollback or resume:** a failed update retains local skill/version
+changes and records its failing stage. Provisioning may already have changed the
+tenant before packaging, validation, or sharing failed. A successful record means
+the full command sequence completed, not that an end-user runtime test passed.
+An interrupted process may leave an `in_progress` record. Inspect the project
+and tenant state before retrying; another explicit update increments the version
+again. Read-only and `-WhatIf` runs do not write provenance.
+
 ## Parameters
 
 | Parameter | Purpose | Default |
@@ -245,9 +333,11 @@ copies files unchanged; it does not rewrite front matter or repair invalid skill
 | `-SampleSkillsPath` | Root containing `<group>\skills` folders | Project's `sample-skills` |
 | `-SkillsPath` | Direct directory containing skill folders; bypasses groups | Not set |
 | `-ShareEmail` | One plain recipient email address | Prompt |
-| `-OutputPath` | Parent directory for the new plugin | Project's `plugins` |
+| `-OutputPath` | Parent directory for the new or existing plugin | Project's `plugins` |
 | `-Environment` | Deployment environment; must be configured as shared | `dev` |
 | `-ReadOnly` | Return Markdown without deployment | Off |
+| `-Update` | Update an existing provisioned shared plugin; replace selected skill and bump package patch version | Off |
+| `-SourceSkillVersion` | Optional source label for provenance, independent of package version | Not set |
 | `-WhatIf` | Preview without WIQD or filesystem/tenant changes | Off |
 | `-Confirm` | Control the confirmation prompt | Confirmation requested |
 
@@ -299,7 +389,8 @@ icons before wider distribution.
 | WIQD is not found | Install WIQD using the official guide, reopen the terminal if needed, and check `wiqd --version`. |
 | Authentication or permission failure | Run `wiqd auth login --interactive`, verify the tenant/account, and check organizational permissions with your administrator. |
 | EULA consent is required | Review WIQD's displayed terms and complete its human consent flow yourself. The script never accepts terms automatically. |
-| Destination already exists | Choose a new `-OutputPath`. Existing projects are intentionally never overwritten or resumed automatically. |
+| Destination already exists | Use `-Update` to deliberately update that provisioned shared plugin. Use a new `-OutputPath` only when you intend a separate deployment. Nothing is resumed automatically. |
+| Update has missing deployment IDs, invalid versions, or conflicting provenance | Inspect the existing project's environment, manifest, and history. Update is blocked rather than creating a replacement deployment or guessing a version. |
 | No groups or skills appear | Check the directory layout and the presence of `skills` folders and `SKILL.md` files. |
 | Environment is not shared or lifecycle is unsupported | Use the standard generated `dev` environment. Do not relabel an already-provisioned personal deployment as shared. |
 | Source or package validation fails | Read the WIQD diagnostics and correct the source skill/configuration. Later steps will not run. |
@@ -323,7 +414,8 @@ checking whether earlier attempts left resources behind.
 Tests mock WIQD and console prompts; they do not provision resources, upload
 packages, or share anything. They cover selection/retries, read-only output,
 custom paths, previews, companion files, package integrity, lifecycle ordering,
-failure gates, EULA handling, and deployment-scope checks.
+failure gates, EULA handling, deployment-scope checks, repeated-run protection,
+source provenance, Git clean/dirty state, and explicit versioned updates.
 
 ## Project entry points
 
